@@ -37,13 +37,14 @@ jobs:
       - name: Download and set up sing-box
         run: |
           # Скачиваем архив sing-box указанной версии
-          curl -sL -o sing-box.tar.gz [https://github.com/SagerNet/sing-box/releases/download/v1.11.15/sing-box-1.11.15-linux-amd64.tar.gz](https://github.com/SagerNet/sing-box/releases/download/v1.11.15/sing-box-1.11.15-linux-amd64.tar.gz)
+          curl -sL -o sing-box.tar.gz https://github.com/SagerNet/sing-box/releases/download/v1.11.15/sing-box-1.11.15-linux-amd64.tar.gz
           # Создаем директорию для распаковки
           mkdir sing-box-dir
           # Распаковываем архив
           tar -xzf sing-box.tar.gz -C sing-box-dir
-          # Перемещаем исполняемый файл в корень и делаем его исполняемым
-          mv sing-box-dir/sing-box-1.11.15-linux-amd64/sing-box .
+          # Перемещаем исполняемый файл в корень и делаем его исполняемым.
+          # Используем wildcard (*), чтобы команда работала, даже если версия в имени папки изменится.
+          mv sing-box-dir/*/sing-box .
           chmod +x ./sing-box
           # Очищаем временные файлы и папки
           rm -rf sing-box-dir sing-box.tar.gz
