@@ -1,67 +1,80 @@
-name: Manual Proxy Test Workflow
+# Имя рабочего процесса, которое будет отображаться в GitHub
+name: Test Proxies Manually
 
+# Условия запуска рабочего процесса
 on:
-  workflow_dispatch: # Allows manual triggering of the workflow
+  # Позволяет запускать этот воркфлоу вручную со страницы Actions в GitHub
+  workflow_dispatch:
 
 jobs:
-  test-and-commit:
+  test-proxies:
+    # Запускаем на последней версии Ubuntu
     runs-on: ubuntu-latest
+
+    # Даем права на запись в репозиторий для сохранения результатов
     permissions:
-      contents: write # Necessary to push changes to the repository
+      contents: write
 
     steps:
+      # 1. Клонируем репозиторий
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # 2. Устанавливаем Node.js версии 20
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20' # Use a modern version of Node.js
+          node-version: '20'
+          # Используем кеш для ускорения последующих сборок
           cache: 'npm'
 
+      # 3. Скачиваем и устанавливаем sing-box
+      - name: Download and install sing-box
+        run: |
+          # URL для последней стабильной версии sing-box (v1.11.15)
+          SINGBOX_URL="https://github.com/SagerNet/sing-box/releases/download/v1.11.15/sing-box-1.11.15-linux-amd64.tar.gz"
+          
+          # Скачиваем архив
+          curl -sL $SINGBOX_URL -o sing-box.tar.gz
+          
+          # Создаем директорию для распаковки
+          mkdir -p sing-box-dist
+          
+          # Распаковываем архив
+          tar -xzf sing-box.tar.gz -C sing-box-dist --strip-components=1
+          
+          # Делаем бинарный файл исполняемым
+          chmod +x ./sing-box-dist/sing-box
+          
+          # Добавляем путь к sing-box в системный PATH, чтобы его можно было вызывать по имени
+          echo "$(pwd)/sing-box-dist" >> $GITHUB_PATH
+          
+          # Проверяем версию для отладки
+          sing-box version
+
+      # 4. Устанавливаем зависимости Node.js
       - name: Install dependencies
         run: npm install
 
-      - name: Download and Extract sing-box
-        run: |
-          # The version specified in the prompt
-          SINGBOX_VERSION="1.11.15"
-          # Construct the download URL for Linux AMD64
-          DOWNLOAD_URL="https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-amd64.tar.gz"
-          
-          echo "Downloading sing-box from ${DOWNLOAD_URL}"
-          curl -sL -o sing-box.tar.gz "${DOWNLOAD_URL}"
-          
-          echo "Extracting..."
-          # Extract the tarball and find the executable in the resulting directory
-          tar -xzf sing-box.tar.gz
-          # Move the executable to the current directory
-          mv sing-box-${SINGBOX_VERSION}-linux-amd64/sing-box .
-          
-          echo "Setting permissions..."
-          chmod +x ./sing-box
-          
-          echo "sing-box is ready:"
-          ./sing-box version
+      # 5. Запускаем основной скрипт тестирования
+      - name: Run proxy test script
+        run: node index.js
 
-      - name: Run the test script
-        run: node main.js
-
+      # 6. Коммитим и отправляем результаты в репозиторий
       - name: Commit and push results
         run: |
-          # Configure git
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          # Настраиваем git
+          git config --global user.name 'GitHub Actions Bot'
+          git config --global user.email 'github-actions-bot@github.com'
           
-          # Check if a new result file was created
-          # Using a wildcard to match the timestamped file
-          if ls tested-*.json 1> /dev/null 2>&1; then
-            echo "New test result file found. Committing to repository."
-            git add tested-*.json
-            # Use a clear commit message
-            git commit -m "feat: Add new proxy test results"
-            git push
+          # Добавляем все новые tested-*.json файлы
+          git add ./tested-*.json
+          
+          # Проверяем, есть ли изменения для коммита
+          if git diff --staged --quiet; then
+            echo "No changes to commit."
           else
-            echo "No new test result file was created. Nothing to commit."
+            # Создаем коммит и отправляем его
+            git commit -m "feat: Add new test results"
+            git push
           fi
-
