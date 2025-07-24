@@ -1,0 +1,68 @@
+# Имя рабочего процесса, которое будет отображаться в GitHub Actions
+name: Test Proxies Manually
+
+# Условия запуска рабочего процесса
+on:
+  # Позволяет запускать этот воркфлоу вручную со страницы Actions
+  workflow_dispatch:
+
+# Задачи, которые будут выполняться
+jobs:
+  test-and-commit:
+    # Запускать на последней версии Ubuntu
+    runs-on: ubuntu-latest
+
+    # Шаги выполнения задачи
+    steps:
+      # 1. Клонирование репозитория
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2. Установка Node.js версии 20.x
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm' # Кэширование npm-пакетов для ускорения последующих сборок
+
+      # 3. Установка зависимостей проекта из package.json
+      - name: Install Node.js dependencies
+        run: npm install
+
+      # 4. Установка системных зависимостей: curl, jq и speedtest-cli
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y curl jq speedtest-cli
+
+      # 5. Загрузка и настройка sing-box
+      - name: Download and set up sing-box
+        run: |
+          # Скачиваем архив sing-box указанной версии
+          curl -sL -o sing-box.tar.gz [https://github.com/SagerNet/sing-box/releases/download/v1.11.15/sing-box-1.11.15-linux-amd64.tar.gz](https://github.com/SagerNet/sing-box/releases/download/v1.11.15/sing-box-1.11.15-linux-amd64.tar.gz)
+          # Создаем директорию для распаковки
+          mkdir sing-box-dir
+          # Распаковываем архив
+          tar -xzf sing-box.tar.gz -C sing-box-dir
+          # Перемещаем исполняемый файл в корень и делаем его исполняемым
+          mv sing-box-dir/sing-box-1.11.15-linux-amd64/sing-box .
+          chmod +x ./sing-box
+          # Очищаем временные файлы и папки
+          rm -rf sing-box-dir sing-box.tar.gz
+          echo "sing-box version:"
+          ./sing-box version
+
+      # 6. Запуск основного скрипта для тестирования прокси
+      - name: Run proxy test script
+        run: node index.mjs
+
+      # 7. Коммит и отправка результатов в репозиторий
+      - name: Commit and push results
+        run: |
+          # Настраиваем git для коммитов от имени GitHub Actions
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          # Добавляем все новые JSON-файлы с результатами
+          git add tested-*.json
+          # Создаем коммит. Если нет изменений, команда завершится без ошибки.
+          git commit -m "feat: Add new proxy test results" || echo "No changes to commit"
+          # Отправляем изменения в репозиторий
+          git push
