@@ -1,90 +1,86 @@
 import { promises as fs } from 'fs';
 import path from 'path';
-import { spawn } from 'child_process';
-import axios from 'axios';
+import { exec, spawn } from 'child_process';
 import { convertLinksToOutbounds } from 'singbox-converter';
-import speedtest from 'speedtest-net';
-import { HttpsProxyAgent } from 'https-proxy-agent';
+import fetch from 'node-fetch';
 
-// --- КОНСТАНТЫ И НАСТРОЙКИ ---
-const LINKS_FILE = 'links.txt';
+// --- КОНФИГУРАЦИЯ ---
+const LINKS_FILE_PATH = 'links.txt';
 const TEST_URL = 'https://ip.oxylabs.io/location';
-const PROXY_PORT = 2080; // Локальный порт для входящих подключений sing-box
-const PROXY_ADDRESS = `http://127.0.0.1:${PROXY_PORT}`;
-const REQUEST_TIMEOUT = 15000; // 15 секунд
-const SINGBOX_CONFIG_FILE = 'config.json';
+const SINGBOX_CONFIG_DIR = './singbox_configs';
+const SINGBOX_PATH = './sing-box'; // Путь к исполняемому файлу sing-box
+const PROXY_PORT = 2080;
+const TIMEOUT_MS = 15000; // 15 секунд
 
 /**
- * Главная функция, запускающая весь процесс
+ * Главная функция для запуска всего процесса.
  */
 async function main() {
-    console.log('Starting proxy test process...');
-    let links;
+    console.log('Начало процесса тестирования прокси...');
     try {
-        links = await getLinksFromFile(LINKS_FILE);
-    } catch (error) {
-        console.error(`Error reading links file: ${error.message}`);
-        process.exit(1);
-    }
-
-    if (links.length === 0) {
-        console.log('No links found to test.');
-        return;
-    }
-
-    console.log(`Found ${links.length} links to test.`);
-    const results = [];
-
-    for (const link of links) {
-        const result = await testProxy(link);
-        results.push(result);
-        console.log(`Result for ${result.name}: ${result.status}`);
-    }
-
-    await saveResultsToJson(results);
-    console.log('All tests finished. Results saved.');
-}
-
-/**
- * Читает файл links.txt и возвращает массив ссылок.
- * Поддерживает прямые ссылки и подписки.
- * @param {string} filePath - Путь к файлу со ссылками.
- * @returns {Promise<string[]>} - Массив ссылок.
- */
-async function getLinksFromFile(filePath) {
-    const fileContent = await fs.readFile(filePath, 'utf-8');
-    const lines = fileContent.trim().split('\n').filter(line => line.trim() !== '');
-
-    if (lines.length === 1 && (lines[0].startsWith('http://') || lines[0].startsWith('https://'))) {
-        console.log(`Detected subscription link. Fetching from: ${lines[0]}`);
-        try {
-            const response = await axios.get(lines[0], { timeout: REQUEST_TIMEOUT });
-            // Подписки могут быть в base64
-            let decodedContent;
-            try {
-                decodedContent = Buffer.from(response.data, 'base64').toString('utf-8');
-            } catch (e) {
-                decodedContent = response.data; // Если не base64, используем как есть
-            }
-            return decodedContent.trim().split('\n').filter(link => link.trim() !== '');
-        } catch (error) {
-            throw new Error(`Failed to fetch subscription: ${error.message}`);
+        await fs.mkdir(SINGBOX_CONFIG_DIR, { recursive: true });
+        const links = await getLinks();
+        if (!links || links.length === 0) {
+            console.log('Файл links.txt пуст или не содержит ссылок. Завершение работы.');
+            return;
         }
+
+        console.log(`Найдено ${links.length} ссылок для тестирования.`);
+        const results = [];
+
+        for (const link of links) {
+            if (!link.trim()) continue;
+            const result = await testProxy(link);
+            results.push(result);
+            console.log(`Тестирование завершено для: ${result.name || link}. Статус: ${result.status}`);
+        }
+
+        await saveResults(results);
+    } catch (error) {
+        console.error('Произошла критическая ошибка в главном процессе:', error);
+    } finally {
+        await fs.rm(SINGBOX_CONFIG_DIR, { recursive: true, force: true });
+        console.log('Временные файлы конфигурации удалены.');
     }
-    
-    return lines;
 }
 
 /**
- * Тестирует один прокси.
+ * Читает ссылки из файла links.txt.
+ * Если в файле одна http/https ссылка, загружает список по ней.
+ * @returns {Promise<string[]>} Массив ссылок.
+ */
+async function getLinks() {
+    try {
+        const data = await fs.readFile(LINKS_FILE_PATH, 'utf-8');
+        const lines = data.trim().split(/\r?\n/);
+
+        if (lines.length === 1 && lines[0].match(/^https?:\/\//)) {
+            console.log('Обнаружена ссылка на подписку. Загрузка...');
+            const response = await fetch(lines[0]);
+            if (!response.ok) {
+                throw new Error(`Не удалось загрузить подписку. Статус: ${response.status}`);
+            }
+            const subscriptionData = await response.text();
+            return subscriptionData.trim().split(/\r?\n/);
+        }
+        return lines;
+    } catch (error) {
+        console.error(`Ошибка при чтении файла ${LINKS_FILE_PATH}:`, error);
+        return [];
+    }
+}
+
+/**
+ * Тестирует один прокси-сервер.
  * @param {string} link - Ссылка на прокси.
- * @returns {Promise<object>} - Объект с результатами теста.
+ * @returns {Promise<object>} Объект с результатами тестирования.
  */
 async function testProxy(link) {
-    const name = link.split('#')[1] || 'Unnamed';
+    const name = link.split('#')[1] || 'N/A';
     const baseResult = {
-        name,
-        full_link: link,
+        name: decodeURIComponent(name),
+        link: link,
+        status: 'error',
         ip_address: "N/A",
         country_code: "N/A",
         city: "N/A",
@@ -93,205 +89,217 @@ async function testProxy(link) {
         ping_ms: "N/A",
         download_mbps: "N/A",
         upload_mbps: "N/A",
-        status: "error",
-        error: "Test failed",
+        error: "Unknown error",
         timestamp: new Date().toISOString()
     };
 
-    let singboxProcess;
+    let singboxProcess = null;
+    const configPath = path.join(SINGBOX_CONFIG_DIR, `config-${Date.now()}.json`);
+
     try {
-        const configGenerated = await generateSingboxConfig(link);
-        if (!configGenerated) {
-            baseResult.error = "Failed to generate sing-box config. Unsupported protocol.";
+        // 1. Создание конфигурации для sing-box
+        const singboxConfig = await createSingboxConfig(link);
+        if (!singboxConfig) {
+            baseResult.error = "Failed to convert link to sing-box config.";
             return baseResult;
         }
+        await fs.writeFile(configPath, JSON.stringify(singboxConfig, null, 2));
 
-        singboxProcess = spawn('sing-box', ['run', '-c', SINGBOX_CONFIG_FILE]);
+        // 2. Запуск sing-box
+        singboxProcess = spawn(SINGBOX_PATH, ['run', '-c', configPath]);
         
-        // Даем sing-box время на запуск
-        await new Promise(resolve => setTimeout(resolve, 3000)); 
+        // Добавляем обработчики для отладки
+        singboxProcess.stdout.on('data', (data) => console.log(`sing-box stdout: ${data.toString().trim()}`));
+        singboxProcess.stderr.on('data', (data) => console.error(`sing-box stderr: ${data.toString().trim()}`));
 
-        const testResults = [];
+        await new Promise(resolve => setTimeout(resolve, 2000)); // Даем время на запуск
+
+        // 3. Проверка работоспособности (Health Check)
+        const healthCheckResult = await performHealthCheck();
+        if (!healthCheckResult.success) {
+            baseResult.error = healthCheckResult.error;
+            return baseResult;
+        }
         
-        // 1. Прогревочный запрос
-        console.log(`[${name}] Running warm-up request...`);
-        await runIpTest();
+        // Заполняем данные из успешной проверки
+        const locationData = healthCheckResult.data;
+        baseResult.ping_ms = healthCheckResult.ping;
+        baseResult.ip_address = locationData?.ip || "N/A";
+        baseResult.country_code = locationData?.country_code || "N/A";
+        baseResult.city = locationData?.city || "N/A";
+        baseResult.asn_organization = locationData?.asn_org || "N/A";
+        baseResult.asn_number = locationData?.asn?.toString() || "N/A";
 
-        // 2. Основные тесты
-        console.log(`[${name}] Running main tests...`);
-        let finalSuccess = false;
-        let lastSuccessfulTest = null;
-
-        const test1 = await runIpTest();
-        testResults.push(test1.success);
-
-        if (test1.success) {
-            finalSuccess = true;
-            lastSuccessfulTest = test1;
-        } else {
-            // Повторная попытка, если первый основной тест не удался
-            console.log(`[${name}] Main test failed, retrying...`);
-            const test2 = await runIpTest();
-            testResults.push(test2.success);
-            if (test2.success) {
-                finalSuccess = true;
-                lastSuccessfulTest = test2;
-            }
-        }
-
-        // 3. Решающий тест, если результаты неоднозначны
-        const successes = testResults.filter(Boolean).length;
-        const failures = testResults.length - successes;
-        if (successes > 0 && failures > 0) {
-            console.log(`[${name}] Ambiguous result, running tie-breaker test...`);
-            const test3 = await runIpTest();
-            testResults.push(test3.success);
-            if (test3.success) {
-                lastSuccessfulTest = test3;
-            }
-        }
-
-        const finalSuccessCount = testResults.filter(Boolean).length;
-        if (testResults.length === 3) {
-            finalSuccess = finalSuccessCount >= 2;
-        } else {
-            finalSuccess = finalSuccessCount >= 1;
-        }
-
-        if (finalSuccess && lastSuccessfulTest) {
-            console.log(`[${name}] IP test successful.`);
-            baseResult.status = "tested";
+        // 4. Тест скорости
+        console.log(`Прокси ${name} рабочий. Запуск speedtest...`);
+        const speedTestResult = await runSpeedTest();
+        if (speedTestResult.success) {
+            baseResult.download_mbps = (speedTestResult.download / 1_000_000 * 8).toFixed(2);
+            baseResult.upload_mbps = (speedTestResult.upload / 1_000_000 * 8).toFixed(2);
+            baseResult.status = 'working';
             baseResult.error = null;
-            baseResult.ping_ms = lastSuccessfulTest.ping.toFixed(3);
-            
-            const locData = lastSuccessfulTest.data;
-            baseResult.ip_address = locData?.ip || "N/A";
-            baseResult.country_code = locData?.country_code || "N/A";
-            baseResult.city = locData?.city || "N/A";
-            baseResult.asn_organization = locData?.asn_organization || "N/A";
-            baseResult.asn_number = locData?.asn_number || "N/A";
-
-            // 4. Speedtest
-            console.log(`[${name}] Running speedtest...`);
-            try {
-                const speed = await runSpeedTest();
-                baseResult.download_mbps = speed.download.toFixed(2);
-                baseResult.upload_mbps = speed.upload.toFixed(2);
-            } catch (speedError) {
-                console.error(`[${name}] Speedtest failed: ${speedError.message}`);
-                baseResult.error = "Speedtest failed";
-            }
         } else {
-            console.log(`[${name}] IP test failed.`);
-            baseResult.error = "IP test failed/timeout";
+            baseResult.error = speedTestResult.error;
         }
 
     } catch (error) {
-        console.error(`[${name}] An unexpected error occurred: ${error.message}`);
+        console.error(`Ошибка при тестировании ${name}:`, error);
         baseResult.error = error.message;
     } finally {
         if (singboxProcess) {
             singboxProcess.kill();
         }
-        try {
-            await fs.unlink(SINGBOX_CONFIG_FILE);
-        } catch (e) {
-            // Игнорируем ошибку, если файла нет
-        }
     }
-
     return baseResult;
 }
 
 /**
- * Генерирует конфигурационный файл для sing-box.
+ * Создает JSON-конфигурацию для sing-box.
  * @param {string} link - Ссылка на прокси.
- * @returns {Promise<boolean>} - true если конфиг создан, false если нет.
+ * @returns {Promise<object|null>} Конфигурационный объект.
  */
-async function generateSingboxConfig(link) {
-    const outbounds = await convertLinksToOutbounds(link);
-    if (!outbounds || outbounds.length === 0) {
-        return false;
-    }
-
-    const config = {
-        log: {
-            level: "warn",
-            timestamp: true,
-        },
-        inbounds: [
-            {
-                type: "mixed",
-                tag: "mixed-in",
-                listen: "127.0.0.1",
-                listen_port: PROXY_PORT,
-            },
-        ],
-        outbounds: outbounds,
-    };
-
-    await fs.writeFile(SINGBOX_CONFIG_FILE, JSON.stringify(config, null, 2));
-    return true;
-}
-
-/**
- * Выполняет один тестовый запрос для проверки IP.
- * @returns {Promise<{success: boolean, data: object|null, ping: number, error: string|null}>}
- */
-async function runIpTest() {
-    const agent = new HttpsProxyAgent(PROXY_ADDRESS);
-    const startTime = process.hrtime.bigint();
-
+async function createSingboxConfig(link) {
     try {
-        const response = await axios.get(TEST_URL, {
-            httpsAgent: agent,
-            timeout: REQUEST_TIMEOUT,
-        });
-        const endTime = process.hrtime.bigint();
-        const ping = Number(endTime - startTime) / 1e6; // в миллисекундах
+        const outbounds = await convertLinksToOutbounds(link);
+        if (!outbounds || outbounds.length === 0) return null;
 
-        if (response.status === 200 && response.data.ip) {
-            return { success: true, data: response.data, ping, error: null };
-        }
-        return { success: false, data: null, ping: 0, error: `Status code: ${response.status}` };
+        const outbound = outbounds[0];
+        outbound.tag = 'proxy-out';
+
+        return {
+            log: { "level": "warn" },
+            inbounds: [{
+                type: 'socks',
+                tag: 'socks-in',
+                listen: '127.0.0.1',
+                listen_port: PROXY_PORT
+            }],
+            outbounds: [outbound],
+            route: {
+                rules: [{
+                    inbound: ['socks-in'],
+                    outbound: 'proxy-out'
+                }]
+            }
+        };
     } catch (error) {
-        return { success: false, data: null, ping: 0, error: error.message };
+        console.error('Ошибка конвертации ссылки:', error);
+        return null;
     }
 }
 
 /**
- * Запускает тест скорости.
- * @returns {Promise<{download: number, upload: number}>} - Скорость в Mbps.
+ * Выполняет curl-запрос через прокси для проверки.
+ * @returns {Promise<{success: boolean, data: object|null, ping: string|null, error: string|null}>}
+ */
+async function runCurlTest() {
+    const command = `curl --proxy socks5h://127.0.0.1:${PROXY_PORT} -s -w "\\n%{time_starttransfer}" --connect-timeout ${TIMEOUT_MS / 1000} -m ${TIMEOUT_MS / 1000} ${TEST_URL}`;
+    
+    return new Promise((resolve) => {
+        exec(command, (error, stdout, stderr) => {
+            if (error) {
+                resolve({ success: false, data: null, ping: null, error: `Curl error: ${error.message}` });
+                return;
+            }
+            if (stderr) {
+                resolve({ success: false, data: null, ping: null, error: `Curl stderr: ${stderr}` });
+                return;
+            }
+
+            const parts = stdout.trim().split('\n');
+            const body = parts.slice(0, -1).join('\n');
+            const timeStartTransfer = parts[parts.length - 1];
+
+            try {
+                const jsonData = JSON.parse(body);
+                const ping = (parseFloat(timeStartTransfer) * 1000).toFixed(3);
+                resolve({ success: true, data: jsonData, ping: ping, error: null });
+            } catch (e) {
+                resolve({ success: false, data: null, ping: null, error: "Failed to parse JSON response from test URL." });
+            }
+        });
+    });
+}
+
+/**
+ * Реализует логику проверки работоспособности с 2-3 запросами.
+ * @returns {Promise<{success: boolean, data: object|null, ping: string|null, error: string|null}>}
+ */
+async function performHealthCheck() {
+    console.log('Запуск проверки работоспособности...');
+    const test1 = await runCurlTest();
+    if (!test1.success) {
+        console.log('Первая проверка не удалась.');
+        return { success: false, error: `Initial test failed: ${test1.error}` };
+    }
+    console.log('Первая проверка успешна. Запуск второй проверки...');
+    
+    const test2 = await runCurlTest();
+    if (test2.success) {
+        console.log('Вторая проверка успешна. Прокси рабочий.');
+        return { success: true, data: test2.data, ping: test2.ping, error: null };
+    }
+
+    console.log('Вторая проверка не удалась. Запуск третьей решающей проверки...');
+    const test3 = await runCurlTest();
+    if (test3.success) {
+        console.log('Третья проверка успешна. Прокси рабочий.');
+        return { success: true, data: test3.data, ping: test3.ping, error: null };
+    } else {
+        console.log('Третья проверка не удалась. Прокси нерабочий.');
+        return { success: false, error: `Second and third tests failed: ${test3.error}` };
+    }
+}
+
+/**
+ * Запускает speedtest-cli через прокси.
+ * @returns {Promise<{success: boolean, download: number, upload: number, error: string|null}>}
  */
 async function runSpeedTest() {
-    try {
-        const result = await speedtest({
-            acceptLicense: true,
-            acceptGdpr: true,
-            proxy: PROXY_ADDRESS, // Передаем прокси в speedtest
+    const command = `speedtest --accept-license --accept-gdpr --format=json --proxy=socks5://127.0.0.1:${PROXY_PORT}`;
+    
+    return new Promise((resolve) => {
+        exec(command, { timeout: 120000 }, (error, stdout, stderr) => { // таймаут 2 минуты
+            if (error) {
+                resolve({ success: false, error: `Speedtest failed: ${error.message}` });
+                return;
+            }
+            if (stderr && !stdout) { // Иногда speedtest пишет прогресс в stderr
+                 console.warn(`Speedtest stderr: ${stderr}`);
+            }
+            try {
+                const result = JSON.parse(stdout);
+                if (result.type === 'result') {
+                    resolve({
+                        success: true,
+                        download: result.download.bandwidth, // в байтах/с
+                        upload: result.upload.bandwidth, // в байтах/с
+                        error: null
+                    });
+                } else {
+                     resolve({ success: false, error: `Speedtest error: ${result.error || 'Unknown error type'}` });
+                }
+            } catch (e) {
+                resolve({ success: false, error: `Failed to parse speedtest JSON output. ${e.message}` });
+            }
         });
-        return {
-            download: result.download.bandwidth * 8 / 1e6, // to Mbps
-            upload: result.upload.bandwidth * 8 / 1e6,     // to Mbps
-        };
-    } catch (err) {
-        throw new Error(`Speedtest execution failed: ${err.message}`);
-    }
+    });
 }
 
 /**
- * Сохраняет массив результатов в JSON файл с временной меткой.
- * @param {object[]} results - Массив объектов с результатами.
+ * Сохраняет результаты в JSON-файл с временной меткой.
+ * @param {object[]} results - Массив с результатами.
  */
-async function saveResultsToJson(results) {
+async function saveResults(results) {
     const timestamp = new Date().toISOString().replace(/:/g, '-').slice(0, -5) + 'Z';
     const filename = `tested-${timestamp}.json`;
-    await fs.writeFile(filename, JSON.stringify(results, null, 2));
-    console.log(`Results saved to ${filename}`);
+    try {
+        await fs.writeFile(filename, JSON.stringify(results, null, 2));
+        console.log(`Результаты успешно сохранены в файл: ${filename}`);
+    } catch (error) {
+        console.error('Не удалось сохранить файл с результатами:', error);
+    }
 }
 
-// Запускаем главную функцию
-main().catch(err => {
-    console.error("A critical error occurred in the main function:", err);
-    process.exit(1);
-});
+// Запуск главной функции
+main();
