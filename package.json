@@ -1,18 +1,15 @@
 {
-  "name": "sing-box-tester",
+  "name": "sing-box-proxy-tester",
   "version": "1.0.0",
-  "description": "A script to test proxy links using sing-box.",
-  "main": "index.js",
+  "description": "A script to test proxy links using sing-box and speedtest-cli.",
+  "main": "index.mjs",
   "type": "module",
+  "private": true,
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.mjs"
   },
-  "author": "",
-  "license": "ISC",
   "dependencies": {
-    "axios": "^1.7.2",
-    "https-proxy-agent": "^7.0.5",
-    "singbox-converter": "^1.0.6",
-    "speedtest-net": "^2.2.0"
+    "node-fetch": "^3.3.2",
+    "singbox-converter": "^1.0.6"
   }
 }
