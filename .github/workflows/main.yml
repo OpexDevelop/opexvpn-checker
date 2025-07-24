@@ -1,0 +1,67 @@
+name: Manual Proxy Test Workflow
+
+on:
+  workflow_dispatch: # Allows manual triggering of the workflow
+
+jobs:
+  test-and-commit:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Necessary to push changes to the repository
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20' # Use a modern version of Node.js
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Download and Extract sing-box
+        run: |
+          # The version specified in the prompt
+          SINGBOX_VERSION="1.11.15"
+          # Construct the download URL for Linux AMD64
+          DOWNLOAD_URL="https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-amd64.tar.gz"
+          
+          echo "Downloading sing-box from ${DOWNLOAD_URL}"
+          curl -sL -o sing-box.tar.gz "${DOWNLOAD_URL}"
+          
+          echo "Extracting..."
+          # Extract the tarball and find the executable in the resulting directory
+          tar -xzf sing-box.tar.gz
+          # Move the executable to the current directory
+          mv sing-box-${SINGBOX_VERSION}-linux-amd64/sing-box .
+          
+          echo "Setting permissions..."
+          chmod +x ./sing-box
+          
+          echo "sing-box is ready:"
+          ./sing-box version
+
+      - name: Run the test script
+        run: node main.js
+
+      - name: Commit and push results
+        run: |
+          # Configure git
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Check if a new result file was created
+          # Using a wildcard to match the timestamped file
+          if ls tested-*.json 1> /dev/null 2>&1; then
+            echo "New test result file found. Committing to repository."
+            git add tested-*.json
+            # Use a clear commit message
+            git commit -m "feat: Add new proxy test results"
+            git push
+          else
+            echo "No new test result file was created. Nothing to commit."
+          fi
+
