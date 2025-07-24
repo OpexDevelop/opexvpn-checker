@@ -32,12 +32,13 @@ jobs:
           # Создаем символическую ссылку в текущей директории для скрипта
           ln -s /usr/local/bin/sing-box ./sing-box
 
-      - name: Install Ookla Speedtest CLI
+      - name: Install Ookla Speedtest CLI (Direct Download)
         run: |
-          # Этот скрипт устанавливает официальный CLI от Ookla
-          sudo apt-get install -y curl
-          curl -s https://packagecloud.io/install/repositories/ookla/speedtest-cli/script.deb.sh | sudo bash
-          sudo apt-get install -y speedtest
+          # Прямая загрузка и установка официального CLI Speedtest от Ookla, чтобы избежать проблем с репозиторием
+          wget -q https://install.speedtest.net/app/cli/ookla-speedtest-1.2.0-linux-x86_64.tgz -O speedtest.tgz
+          tar -xzf speedtest.tgz
+          sudo mv speedtest /usr/local/bin/
+          sudo chmod +x /usr/local/bin/speedtest
 
       - name: Run the proxy testing script
         run: node index.js
