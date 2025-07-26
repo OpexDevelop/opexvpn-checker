@@ -11,6 +11,6 @@
   "license": "ISC",
   "dependencies": {
     "node-fetch": "^3.3.2",
-    "singbox-converter": "^1.0.6"
+    "singbox-converter": "^1.0.8"
   }
 }
