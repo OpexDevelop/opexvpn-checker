@@ -1,7 +1,8 @@
 import { promises as fs } from 'fs';
 import path from 'path';
 import { exec, spawn } from 'child_process';
-import { convertLinksToOutbounds } from 'singbox-converter';
+// ИЗМЕНЕНО: Импортируем новую функцию из библиотеки
+import { convertToOutbounds } from 'singbox-converter';
 import fetch from 'node-fetch';
 
 // --- КОНФИГУРАЦИЯ ---
@@ -160,7 +161,8 @@ async function testProxy(link) {
  */
 async function createSingboxConfig(link) {
     try {
-        const outbounds = await convertLinksToOutbounds(link);
+        // ИЗМЕНЕНО: Используем новую функцию convertToOutbounds
+        const outbounds = await convertToOutbounds(link);
         if (!outbounds || outbounds.length === 0) return null;
 
         const outbound = outbounds[0];
