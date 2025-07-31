@@ -1,58 +1,64 @@
-name: Test Proxies and Save Results
+name: Test Proxy Servers
 
 on:
-  workflow_dispatch: # Позволяет запускать воркфлоу вручную из вкладки Actions
+  workflow_dispatch:
 
 jobs:
   test-proxies:
     runs-on: ubuntu-latest
     permissions:
-      contents: write # Необходимо для коммита результатов обратно в репозиторий
-
+      contents: write
+    
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-python@v5
         with:
-          node-version: '20' # Используем актуальную LTS версию Node.js
-          cache: 'npm'
+          node-version: '20'
 
-      - name: Install dependencies
-        run: npm install
+      - name: Install Node.js dependencies
+        run: |
+          npm install
 
-      - name: Download and setup sing-box
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl jq speedtest-cli bc
+
+      - name: Download and install Sing-box
         run: |
           SINGBOX_VERSION="1.11.15"
-          wget "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-amd64.tar.gz"
+          echo "Installing Sing-box version: $SINGBOX_VERSION"
+          wget https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-amd64.tar.gz
           tar -xzf sing-box-${SINGBOX_VERSION}-linux-amd64.tar.gz
-          sudo mv sing-box-${SINGBOX_VERSION}-linux-amd64/sing-box /usr/local/bin/sing-box
-          sudo chmod +x /usr/local/bin/sing-box
-          # Создаем символическую ссылку в текущей директории для скрипта
-          ln -s /usr/local/bin/sing-box ./sing-box
-
-      - name: Install Ookla Speedtest CLI (Direct Download)
-        run: |
-          # Прямая загрузка и установка официального CLI Speedtest от Ookla, чтобы избежать проблем с репозиторием
-          wget -q https://install.speedtest.net/app/cli/ookla-speedtest-1.2.0-linux-x86_64.tgz -O speedtest.tgz
-          tar -xzf speedtest.tgz
-          sudo mv speedtest /usr/local/bin/
-          sudo chmod +x /usr/local/bin/speedtest
-
-      - name: Run the proxy testing script
-        run: node index.js
-
-      - name: Commit and push results
-        run: |
-          git config --global user.name 'github-actions[bot]'
-          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-          # Добавляем все файлы, начинающиеся с "tested-" и заканчивающиеся на ".json"
-          git add tested-*.json
-          # Коммитим только если есть что коммитить
-          if git diff --staged --quiet; then
-            echo "No changes to commit."
+          RELEASE_DIR_NAME="sing-box-${SINGBOX_VERSION}-linux-amd64"
+          if [ -f ./${RELEASE_DIR_NAME}/sing-box ]; then
+            sudo mv ./${RELEASE_DIR_NAME}/sing-box /usr/local/bin/sing-box
+          elif [ -f ./sing-box ]; then
+            sudo mv ./sing-box /usr/local/bin/sing-box
           else
-            git commit -m "feat: Add new proxy test results"
-            git push
+            echo "Sing-box binary not found!"
+            exit 1
+          fi
+          sudo chmod +x /usr/local/bin/sing-box
+          sing-box version
+
+      - name: Run proxy tests
+        run: |
+          node index.js
+
+      - name: Commit results
+        run: |
+          git config --global user.name 'GitHub Actions Bot'
+          git config --global user.email 'github-actions-bot@users.noreply.github.com'
+          git add tested_*.json
+          if ! git diff --staged --quiet; then
+            git commit -m "Update proxy test results ($(date -u +'%Y-%m-%d %H:%M:%S UTC'))"
+            git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }} HEAD:${{ github.ref_name }}
+          else
+            echo "No changes to test results."
           fi
