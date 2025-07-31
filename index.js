@@ -1,4 +1,4 @@
-import { readFile, writeFile, access } from 'fs/promises';
+import { readFile, writeFile } from 'fs/promises';
 import { spawn } from 'child_process';
 import { convertToOutbounds } from 'singbox-converter';
 import { promisify } from 'util';
@@ -11,31 +11,28 @@ const PROXY_ADDRESS = `socks5h://127.0.0.1:${PROXY_PORT}`;
 const STARTUP_DELAY = 5000;
 const REQUEST_TIMEOUT = 15;
 
-// Read links from file
 async function readLinks() {
     try {
         const content = await readFile('links.txt', 'utf-8');
         const lines = content.trim().split('\n').filter(line => line.trim());
-        
-        // Check if it's a single subscription URL
+
         if (lines.length === 1 && (lines[0].startsWith('http://') || lines[0].startsWith('https://'))) {
             console.log('Detected subscription URL, fetching...');
             const response = await fetch(lines[0]);
             const subContent = await response.text();
-            
-            // Check if content is base64 encoded
+
             try {
                 const decoded = Buffer.from(subContent, 'base64').toString('utf-8');
                 if (decoded.includes('://')) {
                     return decoded.trim().split('\n').filter(line => line.trim());
                 }
             } catch (e) {
-                // Not base64, use as is
+                // Not base64
             }
-            
+
             return subContent.trim().split('\n').filter(line => line.trim());
         }
-        
+
         return lines;
     } catch (error) {
         console.error('Error reading links:', error);
@@ -43,13 +40,11 @@ async function readLinks() {
     }
 }
 
-// Create sing-box config
 function createSingboxConfig(outbound, allowInsecure = false) {
-    // Apply insecure setting if needed
     if (allowInsecure && outbound.tls && outbound.tls.enabled) {
         outbound.tls.insecure = true;
     }
-    
+
     return {
         log: {
             level: "info",
@@ -73,7 +68,6 @@ function createSingboxConfig(outbound, allowInsecure = false) {
     };
 }
 
-// Run sing-box
 function startSingbox(configPath) {
     return new Promise((resolve, reject) => {
         const singbox = spawn('sing-box', ['run', '-c', configPath], {
@@ -88,9 +82,9 @@ function startSingbox(configPath) {
         let started = false;
         const checkStarted = (data) => {
             if (started) return;
-            
+
             const output = data.toString();
-            if (output.includes('started') || 
+            if (output.includes('started') ||
                 output.includes('server started') ||
                 output.includes('tcp server started') ||
                 output.includes('listening') ||
@@ -105,7 +99,7 @@ function startSingbox(configPath) {
         singbox.stderr.on('data', (data) => {
             const error = data.toString();
             checkStarted(data);
-            
+
             if (error.includes('FATAL') || error.includes('panic')) {
                 clearTimeout(startupTimeout);
                 singbox.kill('SIGKILL');
@@ -125,7 +119,6 @@ function startSingbox(configPath) {
             }
         });
 
-        // Additional check after delay
         setTimeout(() => {
             if (!started && startupTimeout) {
                 try {
@@ -141,13 +134,12 @@ function startSingbox(configPath) {
     });
 }
 
-// Make HTTP request through proxy
-async function makeProxyRequest(warmup = false) {
+async function makeProxyRequest() {
     try {
         const curlCommand = `curl -s --proxy "${PROXY_ADDRESS}" --max-time ${REQUEST_TIMEOUT} -w "\\n---STATS---\\nHTTP_CODE:%{http_code}\\nLATENCY_S:%{time_starttransfer}" "${TEST_URL}"`;
-        
+
         const { stdout, stderr } = await exec(curlCommand);
-        
+
         if (stderr) {
             throw new Error(stderr);
         }
@@ -155,10 +147,10 @@ async function makeProxyRequest(warmup = false) {
         const parts = stdout.split('---STATS---');
         const responseBody = parts[0].trim();
         const stats = parts[1] || '';
-        
+
         const httpCode = stats.match(/HTTP_CODE:(\d+)/)?.[1] || '0';
         const latencyS = stats.match(/LATENCY_S:([\d.]+)/)?.[1] || '0';
-        
+
         if (httpCode !== '200') {
             throw new Error(`HTTP ${httpCode}`);
         }
@@ -173,7 +165,7 @@ async function makeProxyRequest(warmup = false) {
         return {
             success: true,
             data: data,
-            latency: parseFloat(latencyS) * 1000 // Convert to ms
+            latency: parseFloat(latencyS) * 1000
         };
     } catch (error) {
         return {
@@ -183,90 +175,10 @@ async function makeProxyRequest(warmup = false) {
     }
 }
 
-// Run speedtest using curl through proxy
-async function runSpeedtest() {
-    let downloadMbps = 'N/A';
-    let uploadMbps = 'N/A';
-
-    try {
-        console.log('Running speedtest through proxy...');
-
-        console.log('  Testing proxy connectivity...');
-        try {
-            const testResult = await exec(
-                `curl -s --proxy socks5h://127.0.0.1:${PROXY_PORT} --max-time 10 -o /dev/null -w "%{http_code}" "https://www.google.com"`
-            );
-            if (testResult.stdout.trim() !== '200') {
-                console.log(`  Proxy test failed: HTTP ${testResult.stdout.trim()}`);
-                return { ping_ms: 'N/A', download_mbps: 'N/A', upload_mbps: 'N/A' };
-            }
-            console.log('  Proxy connectivity: OK');
-        } catch (e) {
-            console.log(`  Proxy connectivity test failed: ${e.message}`);
-            return { ping_ms: 'N/A', download_mbps: 'N/A', upload_mbps: 'N/A' };
-        }
-
-        try {
-            console.log('  Testing download (Cloudflare 10MB)...');
-            const downloadCmd = `curl -s -L --proxy socks5h://127.0.0.1:${PROXY_PORT} --max-time 45 -w "%{speed_download}" -o /dev/null "https://speed.cloudflare.com/__down?bytes=10000000"`;
-            const { stdout } = await exec(downloadCmd);
-            const speed = parseFloat(stdout.trim());
-            if (speed > 0) {
-                downloadMbps = (speed * 8 / 1000000).toFixed(2);
-                console.log(`    Success: ${downloadMbps} Mbps`);
-            } else {
-                console.log('    Download speed was 0.');
-            }
-        } catch (e) {
-            console.log(`    Download test failed: ${e.message}`);
-        }
-
-        const tmpFilePath = path.join(os.tmpdir(), `speedtest_upload_${crypto.randomBytes(4).toString('hex')}.tmp`);
-        try {
-            console.log('  Testing upload (1MB)...');
-            const uploadSizeBytes = 1024 * 1024;
-            const uploadData = crypto.randomBytes(uploadSizeBytes);
-            await fs.writeFile(tmpFilePath, uploadData);
-
-            const uploadCmd = `curl -s --proxy socks5h://127.0.0.1:${PROXY_PORT} --max-time 30 -X POST --data-binary @${tmpFilePath} -w "%{speed_upload}" -o /dev/null "https://speed.cloudflare.com/__up"`;
-            const { stdout } = await exec(uploadCmd);
-            const speed = parseFloat(stdout.trim());
-            if (speed > 0) {
-                uploadMbps = (speed * 8 / 1000000).toFixed(2);
-                console.log(`    Success: ${uploadMbps} Mbps`);
-            } else {
-                console.log('    Upload speed was 0.');
-            }
-        } catch (e) {
-            console.log(`    Upload test failed: ${e.message}`);
-        } finally {
-            try {
-                await fs.unlink(tmpFilePath);
-            } catch (e) {}
-        }
-
-        console.log(`Speedtest results: Down=${downloadMbps}Mbps, Up=${uploadMbps}Mbps`);
-
-        return {
-            ping_ms: 'N/A',
-            download_mbps: downloadMbps,
-            upload_mbps: uploadMbps
-        };
-    } catch (error) {
-        console.error('Speedtest failed:', error.message);
-        return {
-            ping_ms: 'N/A',
-            download_mbps: 'N/A',
-            upload_mbps: 'N/A'
-        };
-    }
-}
-
-// Test with specific insecure setting
 async function testProxyWithSettings(link, index, outbound, allowInsecure) {
     const configFile = `temp_config_${index}_${allowInsecure ? 'insecure' : 'secure'}.json`;
     const config = createSingboxConfig(outbound, allowInsecure);
-    
+
     try {
         await writeFile(configFile, JSON.stringify(config, null, 2));
     } catch (error) {
@@ -288,42 +200,30 @@ async function testProxyWithSettings(link, index, outbound, allowInsecure) {
     }
 
     try {
-        // Warmup request
-        await makeProxyRequest(true);
-        
-        // Test logic
+        await makeProxyRequest();
+
         const request1 = await makeProxyRequest();
         const request2 = await makeProxyRequest();
-        
+
         let finalResult;
         let successCount = [request1, request2].filter(r => r.success).length;
-        
+
         if (successCount === 1) {
-            // Mixed results, need 3rd request
             const request3 = await makeProxyRequest();
             successCount = [request1, request2, request3].filter(r => r.success).length;
             finalResult = [request1, request2, request3].find(r => r.success) || request3;
         } else {
             finalResult = request2.success ? request2 : request1;
         }
-        
+
         const isWorking = successCount >= 2;
-        
-        // If working, run speedtest BEFORE killing sing-box
-        let speedtestResult = null;
-        if (isWorking) {
-            console.log('Running speedtest while proxy is active...');
-            speedtestResult = await runSpeedtest();
-        }
-        
+
         return {
             success: isWorking,
             result: finalResult,
             insecure: allowInsecure,
-            speedtest: speedtestResult
         };
     } finally {
-        // Cleanup
         if (singboxProcess) {
             try {
                 singboxProcess.kill('SIGTERM');
@@ -340,14 +240,13 @@ async function testProxyWithSettings(link, index, outbound, allowInsecure) {
     }
 }
 
-// Test single proxy
 async function testProxy(link, index) {
     console.log(`\n${'='.repeat(50)}`);
     console.log(`Testing proxy ${index + 1}: ${link.substring(0, 50)}...`);
-    
+
     let outbound;
     let name = 'Unknown';
-    
+
     try {
         const outbounds = await convertToOutbounds(link);
         if (!outbounds || outbounds.length === 0) {
@@ -360,34 +259,29 @@ async function testProxy(link, index) {
         return createErrorResult(link, 'Conversion failed: ' + error.message, name);
     }
 
-    // First try without insecure
     console.log('Testing with secure mode...');
     let testResult = await testProxyWithSettings(link, index, outbound, false);
-    
-    // If failed, try with insecure
+
     if (!testResult.success && outbound.tls && outbound.tls.enabled) {
         console.log('Secure mode failed, trying with insecure mode...');
         testResult = await testProxyWithSettings(link, index, outbound, true);
     }
-    
+
     if (testResult.success) {
         console.log(`Proxy is working (insecure: ${testResult.insecure})`);
-        
-        const speedtest = testResult.speedtest || { ping_ms: 'N/A', download_mbps: 'N/A', upload_mbps: 'N/A' };
-        
+
         const ipData = testResult.result.data || {};
         const providers = ipData.providers || {};
-        
-        // Extract data with fallbacks
-        const country = providers.dbip?.country || providers.ip2location?.country || 
-                      providers.ipinfo?.country || providers.maxmind?.country || 'N/A';
-        const city = providers.dbip?.city || providers.ip2location?.city || 
-                    providers.ipinfo?.city || providers.maxmind?.city || 'N/A';
-        const asn_org = providers.dbip?.org_name || providers.ip2location?.org_name || 
-                       providers.ipinfo?.org_name || providers.maxmind?.org_name || 'N/A';
-        const asn_number = providers.dbip?.asn || providers.ip2location?.asn || 
-                          providers.ipinfo?.asn || providers.maxmind?.asn || 'N/A';
-        
+
+        const country = providers.dbip?.country || providers.ip2location?.country ||
+            providers.ipinfo?.country || providers.maxmind?.country || 'N/A';
+        const city = providers.dbip?.city || providers.ip2location?.city ||
+            providers.ipinfo?.city || providers.maxmind?.city || 'N/A';
+        const asn_org = providers.dbip?.org_name || providers.ip2location?.org_name ||
+            providers.ipinfo?.org_name || providers.maxmind?.org_name || 'N/A';
+        const asn_number = providers.dbip?.asn || providers.ip2location?.asn ||
+            providers.ipinfo?.asn || providers.maxmind?.asn || 'N/A';
+
         return {
             status: 'working',
             name: name,
@@ -397,27 +291,23 @@ async function testProxy(link, index) {
             city: city,
             asn_organization: asn_org,
             asn_number: asn_number,
-            ping_ms: testResult.result.latency?.toFixed(0) || speedtest.ping_ms,
-            download_mbps: speedtest.download_mbps,
-            upload_mbps: speedtest.upload_mbps,
+            ping_ms: testResult.result.latency?.toFixed(0) || 'N/A',
             insecure: testResult.insecure,
-            speedtest_result: speedtest,
             ip_info_response: ipData,
             timestamp: new Date().toISOString()
         };
     } else {
         console.log('Proxy not working');
-        return createErrorResult(link, testResult.error, name);
+        const errorMessage = testResult.error || (testResult.result && testResult.result.error) || 'Unknown test failure';
+        return createErrorResult(link, errorMessage, name);
     }
 }
 
-// Extract name from link
 function extractNameFromLink(link) {
     const match = link.match(/#(.+)$/);
     return match ? decodeURIComponent(match[1]) : null;
 }
 
-// Create error result
 function createErrorResult(link, error, name = 'Unknown') {
     return {
         status: 'error',
@@ -429,56 +319,50 @@ function createErrorResult(link, error, name = 'Unknown') {
         asn_organization: 'N/A',
         asn_number: 'N/A',
         ping_ms: 'N/A',
-        download_mbps: 'N/A',
-        upload_mbps: 'N/A',
         insecure: false,
         error: error,
         timestamp: new Date().toISOString()
     };
 }
 
-// Main function
 async function main() {
     console.log('Starting proxy tests...');
-    
+
     const links = await readLinks();
     if (links.length === 0) {
         console.error('No links found in links.txt');
         return;
     }
-    
+
     console.log(`Found ${links.length} links to test`);
-    
+
     const results = [];
-    
+
     for (let i = 0; i < links.length; i++) {
         const result = await testProxy(links[i], i);
         results.push(result);
-        
+
         console.log(`Result: ${result.status}`);
         if (result.status === 'error') {
             console.log(`Error: ${result.error}`);
         }
     }
-    
-    // Save results
+
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const filename = `tested_${timestamp}.json`;
-    
+
     await writeFile(filename, JSON.stringify(results, null, 2));
     console.log(`\nResults saved to ${filename}`);
-    
-    // Summary
+
     const working = results.filter(r => r.status === 'working').length;
     const failed = results.filter(r => r.status === 'error').length;
     const secure = results.filter(r => r.status === 'working' && !r.insecure).length;
     const insecure = results.filter(r => r.status === 'working' && r.insecure).length;
-    
+
     console.log(`\nSummary:`);
     console.log(`  Total: ${results.length}`);
     console.log(`  Working: ${working} (Secure: ${secure}, Insecure: ${insecure})`);
     console.log(`  Failed: ${failed}`);
 }
 
-// Run
 main().catch(console.error);
