@@ -184,6 +184,7 @@ async function makeProxyRequest(warmup = false) {
 }
 
 // Run speedtest using curl through proxy
+// Run speedtest using curl through proxy
 async function runSpeedtest() {
     try {
         console.log('Running speedtest through proxy...');
