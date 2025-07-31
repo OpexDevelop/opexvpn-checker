@@ -183,111 +183,97 @@ async function makeProxyRequest(warmup = false) {
     }
 }
 
-// Custom speed test using curl
+// Run speedtest using curl through proxy
 async function runSpeedtest() {
     try {
-        console.log('Running speed test...');
+        console.log('Running speedtest through proxy...');
         
-        // Test download speed using a CDN test file
-        const downloadUrls = [
-            'https://speed.cloudflare.com/__down?bytes=10000000', // 10MB
-            'https://www.speedtest.net/apps/cli', // Alternative
-            'https://proof.ovh.net/files/10Mb.dat' // OVH test file
+        // Test download speed with multiple test files
+        const downloadTests = [
+            { url: 'https://speed.cloudflare.com/__down?bytes=10000000', name: 'Cloudflare 10MB' },
+            { url: 'https://proof.ovh.net/files/10Mb.dat', name: 'OVH 10MB' },
+            { url: 'https://speed.hetzner.de/100MB.bin', name: 'Hetzner 100MB', maxBytes: 10000000 }
         ];
         
-        let downloadSpeed = 'N/A';
-        let ping = 'N/A';
+        let totalDownloadTime = 0;
+        let totalDownloadBytes = 0;
+        let downloadSuccess = false;
         
-        // Measure ping first
-        try {
-            const pingCommand = `curl -s --proxy "${PROXY_ADDRESS}" -o /dev/null -w "%{time_connect}" https://www.google.com`;
-            const { stdout } = await exec(pingCommand);
-            ping = (parseFloat(stdout) * 1000).toFixed(3);
-        } catch (e) {
-            console.error('Ping test failed:', e.message);
-        }
-        
-        // Download speed test
-        for (const url of downloadUrls) {
+        for (const test of downloadTests) {
             try {
-                const downloadCommand = `curl -s --proxy "${PROXY_ADDRESS}" -o /dev/null -w "%{speed_download}" "${url}" --max-time 30`;
-                const { stdout } = await exec(downloadCommand);
-                const bytesPerSec = parseFloat(stdout);
-                if (bytesPerSec > 0) {
-                    // Convert bytes/sec to Mbit/s
-                    downloadSpeed = ((bytesPerSec * 8) / 1000000).toFixed(2);
-                    break;
+                let curlCmd = `curl -s --proxy "${PROXY_ADDRESS}" --max-time 30 -w "\\n%{size_download}\\n%{time_total}\\n%{speed_download}" -o /dev/null`;
+                
+                // If maxBytes specified, limit download size
+                if (test.maxBytes) {
+                    curlCmd += ` -r 0-${test.maxBytes}`;
+                }
+                
+                curlCmd += ` "${test.url}"`;
+                
+                const { stdout } = await exec(curlCmd);
+                
+                const lines = stdout.trim().split('\n').filter(line => line);
+                if (lines.length >= 3) {
+                    const sizeDownload = parseInt(lines[lines.length - 3]) || 0;
+                    const timeTotal = parseFloat(lines[lines.length - 2]) || 0;
+                    const speedDownload = parseFloat(lines[lines.length - 1]) || 0;
+                    
+                    if (sizeDownload > 0 && timeTotal > 0) {
+                        totalDownloadBytes += sizeDownload;
+                        totalDownloadTime += timeTotal;
+                        downloadSuccess = true;
+                        console.log(`  ${test.name}: ${(speedDownload * 8 / 1000000).toFixed(2)} Mbps`);
+                    }
                 }
             } catch (e) {
-                continue;
+                console.log(`  ${test.name}: Failed`);
             }
         }
         
-        // Simple upload test (POST data to httpbin)
-        let uploadSpeed = 'N/A';
+        // Calculate average download speed in Mbps
+        let downloadMbps = 'N/A';
+        if (downloadSuccess && totalDownloadTime > 0) {
+            const downloadBytesPerSecond = totalDownloadBytes / totalDownloadTime;
+            downloadMbps = ((downloadBytesPerSecond * 8) / 1000000).toFixed(2);
+        }
+        
+        // Test upload speed
+        let uploadMbps = 'N/A';
         try {
-            // Generate 1MB of data
-            const uploadData = 'x'.repeat(1000000);
-            const uploadCommand = `curl -s --proxy "${PROXY_ADDRESS}" -X POST -d "${uploadData}" -o /dev/null -w "%{speed_upload}" https://httpbin.org/post --max-time 30`;
-            const { stdout } = await exec(uploadCommand);
-            const bytesPerSec = parseFloat(stdout);
-            if (bytesPerSec > 0) {
-                // Convert bytes/sec to Mbit/s
-                uploadSpeed = ((bytesPerSec * 8) / 1000000).toFixed(2);
+            // Create a 1MB test file
+            const testDataSize = 1000000; // 1MB
+            await exec(`dd if=/dev/urandom of=/tmp/upload_test.dat bs=1024 count=1000 2>/dev/null`);
+            
+            const uploadStart = Date.now();
+            const { stdout } = await exec(`curl -s --proxy "${PROXY_ADDRESS}" --max-time 30 -X POST --data-binary @/tmp/upload_test.dat -w "\\n%{size_upload}\\n%{time_total}\\n%{speed_upload}" -o /dev/null "https://httpbin.org/post"`);
+            
+            const lines = stdout.trim().split('\n').filter(line => line);
+            if (lines.length >= 3) {
+                const speedUpload = parseFloat(lines[lines.length - 1]) || 0;
+                if (speedUpload > 0) {
+                    uploadMbps = ((speedUpload * 8) / 1000000).toFixed(2);
+                }
             }
+            
+            await exec('rm -f /tmp/upload_test.dat');
         } catch (e) {
-            console.error('Upload test failed:', e.message);
+            console.log('  Upload test: Failed');
         }
         
-        console.log(`Speed test results: Ping=${ping}ms, Down=${downloadSpeed}Mbps, Up=${uploadSpeed}Mbps`);
+        console.log(`Speedtest results: Down=${downloadMbps}Mbps, Up=${uploadMbps}Mbps`);
         
         return {
-            ping_ms: ping,
-            download_mbps: downloadSpeed,
-            upload_mbps: uploadSpeed
+            ping_ms: 'N/A', // Will be overridden by actual latency
+            download_mbps: downloadMbps,
+            upload_mbps: uploadMbps
         };
     } catch (error) {
-        console.error('Speed test failed:', error.message);
+        console.error('Speedtest failed:', error.message);
         return {
             ping_ms: 'N/A',
             download_mbps: 'N/A',
             upload_mbps: 'N/A'
         };
-    }
-}
-
-// Alternative: Use proxychains if available
-async function runSpeedtestWithProxychains() {
-    try {
-        // Check if proxychains is available
-        await exec('which proxychains4');
-        
-        // Create proxychains config
-        const proxychainsConfig = `
-[ProxyList]
-socks5 127.0.0.1 ${PROXY_PORT}
-`;
-        await writeFile('/tmp/proxychains.conf', proxychainsConfig);
-        
-        console.log('Running speedtest with proxychains...');
-        const { stdout } = await exec(`proxychains4 -f /tmp/proxychains.conf -q speedtest-cli --simple --timeout 45`);
-        
-        const ping = stdout.match(/Ping: ([\d.]+) ms/)?.[1] || 'N/A';
-        const download = stdout.match(/Download: ([\d.]+) Mbit\/s/)?.[1] || 'N/A';
-        const upload = stdout.match(/Upload: ([\d.]+) Mbit\/s/)?.[1] || 'N/A';
-        
-        await exec('rm -f /tmp/proxychains.conf');
-        
-        console.log(`Speedtest results: Ping=${ping}ms, Down=${download}Mbps, Up=${upload}Mbps`);
-        
-        return {
-            ping_ms: ping,
-            download_mbps: download,
-            upload_mbps: upload
-        };
-    } catch (error) {
-        // Proxychains not available, use custom speed test
-        return await runSpeedtest();
     }
 }
 
@@ -393,7 +379,7 @@ async function testProxy(link, index) {
     
     if (testResult.success) {
         console.log(`Proxy is working (insecure: ${testResult.insecure})`);
-        const speedtest = await runSpeedtestWithProxychains();
+        const speedtest = await runSpeedtest();
         
         const ipData = testResult.result.data || {};
         const providers = ipData.providers || {};
