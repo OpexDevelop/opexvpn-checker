@@ -1,307 +1,329 @@
-import { promises as fs } from 'fs';
-import path from 'path';
-import { exec, spawn } from 'child_process';
-// ИЗМЕНЕНО: Импортируем новую функцию из библиотеки
+import { readFile, writeFile, access } from 'fs/promises';
+import { spawn } from 'child_process';
 import { convertToOutbounds } from 'singbox-converter';
-import fetch from 'node-fetch';
+import { promisify } from 'util';
+import { exec as execCallback } from 'child_process';
 
-// --- КОНФИГУРАЦИЯ ---
-const LINKS_FILE_PATH = 'links.txt';
+const exec = promisify(execCallback);
 const TEST_URL = 'https://ip.oxylabs.io/location';
-const SINGBOX_CONFIG_DIR = './singbox_configs';
-const SINGBOX_PATH = './sing-box'; // Путь к исполняемому файлу sing-box
-const PROXY_PORT = 2080;
-const TIMEOUT_MS = 15000; // 15 секунд
+const PROXY_PORT = 10808;
+const PROXY_ADDRESS = `socks5h://127.0.0.1:${PROXY_PORT}`;
+const STARTUP_DELAY = 3000;
+const REQUEST_TIMEOUT = 15;
 
-/**
- * Главная функция для запуска всего процесса.
- */
-async function main() {
-    console.log('Начало процесса тестирования прокси...');
+// Read links from file
+async function readLinks() {
     try {
-        await fs.mkdir(SINGBOX_CONFIG_DIR, { recursive: true });
-        const links = await getLinks();
-        if (!links || links.length === 0) {
-            console.log('Файл links.txt пуст или не содержит ссылок. Завершение работы.');
-            return;
-        }
-
-        console.log(`Найдено ${links.length} ссылок для тестирования.`);
-        const results = [];
-
-        for (const link of links) {
-            if (!link.trim()) continue;
-            const result = await testProxy(link);
-            results.push(result);
-            console.log(`Тестирование завершено для: ${result.name || link}. Статус: ${result.status}`);
-        }
-
-        await saveResults(results);
-    } catch (error) {
-        console.error('Произошла критическая ошибка в главном процессе:', error);
-    } finally {
-        await fs.rm(SINGBOX_CONFIG_DIR, { recursive: true, force: true });
-        console.log('Временные файлы конфигурации удалены.');
-    }
-}
-
-/**
- * Читает ссылки из файла links.txt.
- * Если в файле одна http/https ссылка, загружает список по ней.
- * @returns {Promise<string[]>} Массив ссылок.
- */
-async function getLinks() {
-    try {
-        const data = await fs.readFile(LINKS_FILE_PATH, 'utf-8');
-        const lines = data.trim().split(/\r?\n/);
-
-        if (lines.length === 1 && lines[0].match(/^https?:\/\//)) {
-            console.log('Обнаружена ссылка на подписку. Загрузка...');
+        const content = await readFile('links.txt', 'utf-8');
+        const lines = content.trim().split('\n').filter(line => line.trim());
+        
+        // Check if it's a single subscription URL
+        if (lines.length === 1 && (lines[0].startsWith('http://') || lines[0].startsWith('https://'))) {
+            console.log('Detected subscription URL, fetching...');
             const response = await fetch(lines[0]);
-            if (!response.ok) {
-                throw new Error(`Не удалось загрузить подписку. Статус: ${response.status}`);
+            const subContent = await response.text();
+            
+            // Check if content is base64 encoded
+            try {
+                const decoded = Buffer.from(subContent, 'base64').toString('utf-8');
+                if (decoded.includes('://')) {
+                    return decoded.trim().split('\n').filter(line => line.trim());
+                }
+            } catch (e) {
+                // Not base64, use as is
             }
-            const subscriptionData = await response.text();
-            return subscriptionData.trim().split(/\r?\n/);
+            
+            return subContent.trim().split('\n').filter(line => line.trim());
         }
+        
         return lines;
     } catch (error) {
-        console.error(`Ошибка при чтении файла ${LINKS_FILE_PATH}:`, error);
+        console.error('Error reading links:', error);
         return [];
     }
 }
 
-/**
- * Тестирует один прокси-сервер.
- * @param {string} link - Ссылка на прокси.
- * @returns {Promise<object>} Объект с результатами тестирования.
- */
-async function testProxy(link) {
-    const name = link.split('#')[1] || 'N/A';
-    const baseResult = {
-        name: decodeURIComponent(name),
-        link: link,
-        status: 'error',
-        ip_address: "N/A",
-        country_code: "N/A",
-        city: "N/A",
-        asn_organization: "N/A",
-        asn_number: "N/A",
-        ping_ms: "N/A",
-        download_mbps: "N/A",
-        upload_mbps: "N/A",
-        error: "Unknown error",
-        timestamp: new Date().toISOString()
+// Create sing-box config
+function createSingboxConfig(outbound) {
+    return {
+        log: {
+            level: "info",
+            timestamp: true
+        },
+        inbounds: [{
+            type: "socks",
+            tag: "socks-in",
+            listen: "127.0.0.1",
+            listen_port: PROXY_PORT,
+            sniff: true,
+            sniff_override_destination: false
+        }],
+        outbounds: [outbound],
+        route: {
+            rules: [{
+                inbound: ["socks-in"],
+                outbound: outbound.tag
+            }]
+        }
     };
-
-    let singboxProcess = null;
-    const configPath = path.join(SINGBOX_CONFIG_DIR, `config-${Date.now()}.json`);
-
-    try {
-        // 1. Создание конфигурации для sing-box
-        const singboxConfig = await createSingboxConfig(link);
-        if (!singboxConfig) {
-            baseResult.error = "Failed to convert link to sing-box config.";
-            return baseResult;
-        }
-        await fs.writeFile(configPath, JSON.stringify(singboxConfig, null, 2));
-
-        // 2. Запуск sing-box
-        singboxProcess = spawn(SINGBOX_PATH, ['run', '-c', configPath]);
-        
-        // Добавляем обработчики для отладки
-        singboxProcess.stdout.on('data', (data) => console.log(`sing-box stdout: ${data.toString().trim()}`));
-        singboxProcess.stderr.on('data', (data) => console.error(`sing-box stderr: ${data.toString().trim()}`));
-
-        await new Promise(resolve => setTimeout(resolve, 2000)); // Даем время на запуск
-
-        // 3. Проверка работоспособности (Health Check)
-        const healthCheckResult = await performHealthCheck();
-        if (!healthCheckResult.success) {
-            baseResult.error = healthCheckResult.error;
-            return baseResult;
-        }
-        
-        // Заполняем данные из успешной проверки
-        const locationData = healthCheckResult.data;
-        baseResult.ping_ms = healthCheckResult.ping;
-        baseResult.ip_address = locationData?.ip || "N/A";
-        baseResult.country_code = locationData?.country_code || "N/A";
-        baseResult.city = locationData?.city || "N/A";
-        baseResult.asn_organization = locationData?.asn_org || "N/A";
-        baseResult.asn_number = locationData?.asn?.toString() || "N/A";
-
-        // 4. Тест скорости
-        console.log(`Прокси ${name} рабочий. Запуск speedtest...`);
-        const speedTestResult = await runSpeedTest();
-        if (speedTestResult.success) {
-            baseResult.download_mbps = (speedTestResult.download / 1_000_000 * 8).toFixed(2);
-            baseResult.upload_mbps = (speedTestResult.upload / 1_000_000 * 8).toFixed(2);
-            baseResult.status = 'working';
-            baseResult.error = null;
-        } else {
-            baseResult.error = speedTestResult.error;
-        }
-
-    } catch (error) {
-        console.error(`Ошибка при тестировании ${name}:`, error);
-        baseResult.error = error.message;
-    } finally {
-        if (singboxProcess) {
-            singboxProcess.kill();
-        }
-    }
-    return baseResult;
 }
 
-/**
- * Создает JSON-конфигурацию для sing-box.
- * @param {string} link - Ссылка на прокси.
- * @returns {Promise<object|null>} Конфигурационный объект.
- */
-async function createSingboxConfig(link) {
-    try {
-        // ИЗМЕНЕНО: Используем новую функцию convertToOutbounds
-        const outbounds = await convertToOutbounds(link);
-        if (!outbounds || outbounds.length === 0) return null;
+// Run sing-box
+function startSingbox(configPath) {
+    return new Promise((resolve, reject) => {
+        const singbox = spawn('sing-box', ['run', '-c', configPath], {
+            stdio: ['ignore', 'pipe', 'pipe']
+        });
 
-        const outbound = outbounds[0];
-        outbound.tag = 'proxy-out';
+        let startupTimeout = setTimeout(() => {
+            reject(new Error('Sing-box startup timeout'));
+        }, 10000);
+
+        singbox.stdout.on('data', (data) => {
+            const output = data.toString();
+            if (output.includes('sing-box started') || output.includes('tcp server started')) {
+                clearTimeout(startupTimeout);
+                setTimeout(() => resolve(singbox), STARTUP_DELAY);
+            }
+        });
+
+        singbox.stderr.on('data', (data) => {
+            const error = data.toString();
+            if (error.includes('ERROR')) {
+                clearTimeout(startupTimeout);
+                reject(new Error(`Sing-box error: ${error}`));
+            }
+        });
+
+        singbox.on('error', (err) => {
+            clearTimeout(startupTimeout);
+            reject(err);
+        });
+    });
+}
+
+// Make HTTP request through proxy
+async function makeProxyRequest(warmup = false) {
+    try {
+        const curlCommand = `curl -s --proxy "${PROXY_ADDRESS}" --max-time ${REQUEST_TIMEOUT} -w "\\n---STATS---\\nHTTP_CODE:%{http_code}\\nLATENCY_S:%{time_starttransfer}" "${TEST_URL}"`;
+        
+        const { stdout, stderr } = await exec(curlCommand);
+        
+        if (stderr) {
+            throw new Error(stderr);
+        }
+
+        const parts = stdout.split('---STATS---');
+        const responseBody = parts[0].trim();
+        const stats = parts[1] || '';
+        
+        const httpCode = stats.match(/HTTP_CODE:(\d+)/)?.[1] || '0';
+        const latencyS = stats.match(/LATENCY_S:([\d.]+)/)?.[1] || '0';
+        
+        if (httpCode !== '200') {
+            throw new Error(`HTTP ${httpCode}`);
+        }
 
         return {
-            log: { "level": "warn" },
-            inbounds: [{
-                type: 'socks',
-                tag: 'socks-in',
-                listen: '127.0.0.1',
-                listen_port: PROXY_PORT
-            }],
-            outbounds: [outbound],
-            route: {
-                rules: [{
-                    inbound: ['socks-in'],
-                    outbound: 'proxy-out'
-                }]
-            }
+            success: true,
+            data: JSON.parse(responseBody),
+            latency: parseFloat(latencyS) * 1000 // Convert to ms
         };
     } catch (error) {
-        console.error('Ошибка конвертации ссылки:', error);
-        return null;
+        return {
+            success: false,
+            error: error.message
+        };
     }
 }
 
-/**
- * Выполняет curl-запрос через прокси для проверки.
- * @returns {Promise<{success: boolean, data: object|null, ping: string|null, error: string|null}>}
- */
-async function runCurlTest() {
-    const command = `curl --proxy socks5h://127.0.0.1:${PROXY_PORT} -s -w "\\n%{time_starttransfer}" --connect-timeout ${TIMEOUT_MS / 1000} -m ${TIMEOUT_MS / 1000} ${TEST_URL}`;
-    
-    return new Promise((resolve) => {
-        exec(command, (error, stdout, stderr) => {
-            if (error) {
-                resolve({ success: false, data: null, ping: null, error: `Curl error: ${error.message}` });
-                return;
-            }
-            if (stderr) {
-                resolve({ success: false, data: null, ping: null, error: `Curl stderr: ${stderr}` });
-                return;
-            }
-
-            const parts = stdout.trim().split('\n');
-            const body = parts.slice(0, -1).join('\n');
-            const timeStartTransfer = parts[parts.length - 1];
-
-            try {
-                const jsonData = JSON.parse(body);
-                const ping = (parseFloat(timeStartTransfer) * 1000).toFixed(3);
-                resolve({ success: true, data: jsonData, ping: ping, error: null });
-            } catch (e) {
-                resolve({ success: false, data: null, ping: null, error: "Failed to parse JSON response from test URL." });
-            }
-        });
-    });
-}
-
-/**
- * Реализует логику проверки работоспособности с 2-3 запросами.
- * @returns {Promise<{success: boolean, data: object|null, ping: string|null, error: string|null}>}
- */
-async function performHealthCheck() {
-    console.log('Запуск проверки работоспособности...');
-    const test1 = await runCurlTest();
-    if (!test1.success) {
-        console.log('Первая проверка не удалась.');
-        return { success: false, error: `Initial test failed: ${test1.error}` };
-    }
-    console.log('Первая проверка успешна. Запуск второй проверки...');
-    
-    const test2 = await runCurlTest();
-    if (test2.success) {
-        console.log('Вторая проверка успешна. Прокси рабочий.');
-        return { success: true, data: test2.data, ping: test2.ping, error: null };
-    }
-
-    console.log('Вторая проверка не удалась. Запуск третьей решающей проверки...');
-    const test3 = await runCurlTest();
-    if (test3.success) {
-        console.log('Третья проверка успешна. Прокси рабочий.');
-        return { success: true, data: test3.data, ping: test3.ping, error: null };
-    } else {
-        console.log('Третья проверка не удалась. Прокси нерабочий.');
-        return { success: false, error: `Second and third tests failed: ${test3.error}` };
-    }
-}
-
-/**
- * Запускает speedtest-cli через прокси.
- * @returns {Promise<{success: boolean, download: number, upload: number, error: string|null}>}
- */
-async function runSpeedTest() {
-    const command = `speedtest --accept-license --accept-gdpr --format=json --proxy=socks5://127.0.0.1:${PROXY_PORT}`;
-    
-    return new Promise((resolve) => {
-        exec(command, { timeout: 120000 }, (error, stdout, stderr) => { // таймаут 2 минуты
-            if (error) {
-                resolve({ success: false, error: `Speedtest failed: ${error.message}` });
-                return;
-            }
-            if (stderr && !stdout) { // Иногда speedtest пишет прогресс в stderr
-                 console.warn(`Speedtest stderr: ${stderr}`);
-            }
-            try {
-                const result = JSON.parse(stdout);
-                if (result.type === 'result') {
-                    resolve({
-                        success: true,
-                        download: result.download.bandwidth, // в байтах/с
-                        upload: result.upload.bandwidth, // в байтах/с
-                        error: null
-                    });
-                } else {
-                     resolve({ success: false, error: `Speedtest error: ${result.error || 'Unknown error type'}` });
-                }
-            } catch (e) {
-                resolve({ success: false, error: `Failed to parse speedtest JSON output. ${e.message}` });
-            }
-        });
-    });
-}
-
-/**
- * Сохраняет результаты в JSON-файл с временной меткой.
- * @param {object[]} results - Массив с результатами.
- */
-async function saveResults(results) {
-    const timestamp = new Date().toISOString().replace(/:/g, '-').slice(0, -5) + 'Z';
-    const filename = `tested-${timestamp}.json`;
+// Run speedtest
+async function runSpeedtest() {
     try {
-        await fs.writeFile(filename, JSON.stringify(results, null, 2));
-        console.log(`Результаты успешно сохранены в файл: ${filename}`);
+        const { stdout } = await exec(`ALL_PROXY="${PROXY_ADDRESS}" speedtest-cli --simple --timeout 45`);
+        
+        const ping = stdout.match(/Ping: ([\d.]+) ms/)?.[1] || 'N/A';
+        const download = stdout.match(/Download: ([\d.]+) Mbit\/s/)?.[1] || 'N/A';
+        const upload = stdout.match(/Upload: ([\d.]+) Mbit\/s/)?.[1] || 'N/A';
+        
+        return {
+            ping_ms: ping,
+            download_mbps: download,
+            upload_mbps: upload
+        };
     } catch (error) {
-        console.error('Не удалось сохранить файл с результатами:', error);
+        console.error('Speedtest failed:', error.message);
+        return {
+            ping_ms: 'N/A',
+            download_mbps: 'N/A',
+            upload_mbps: 'N/A'
+        };
     }
 }
 
-// Запуск главной функции
-main();
+// Test single proxy
+async function testProxy(link, index) {
+    console.log(`\nTesting proxy ${index + 1}: ${link.substring(0, 50)}...`);
+    
+    let outbound;
+    try {
+        const outbounds = await convertToOutbounds(link);
+        if (!outbounds || outbounds.length === 0) {
+            throw new Error('Failed to convert link to outbound');
+        }
+        outbound = outbounds[0];
+    } catch (error) {
+        console.error('Conversion error:', error.message);
+        return createErrorResult(link, 'Conversion failed: ' + error.message);
+    }
+
+    const configFile = `temp_config_${index}.json`;
+    const config = createSingboxConfig(outbound);
+    
+    try {
+        await writeFile(configFile, JSON.stringify(config, null, 2));
+    } catch (error) {
+        return createErrorResult(link, 'Failed to write config: ' + error.message, outbound.tag);
+    }
+
+    let singboxProcess;
+    try {
+        singboxProcess = await startSingbox(configFile);
+    } catch (error) {
+        await exec(`rm -f ${configFile}`);
+        return createErrorResult(link, 'Sing-box startup failed: ' + error.message, outbound.tag);
+    }
+
+    try {
+        // Warmup request
+        console.log('Making warmup request...');
+        await makeProxyRequest(true);
+        
+        // Test logic: make 2 requests, if mixed results, make 3rd
+        console.log('Making test requests...');
+        const request1 = await makeProxyRequest();
+        const request2 = await makeProxyRequest();
+        
+        let finalResult;
+        let successCount = [request1, request2].filter(r => r.success).length;
+        
+        if (successCount === 1) {
+            // Mixed results, need 3rd request
+            console.log('Mixed results, making 3rd request...');
+            const request3 = await makeProxyRequest();
+            successCount = [request1, request2, request3].filter(r => r.success).length;
+            finalResult = [request1, request2, request3].find(r => r.success) || request3;
+        } else {
+            finalResult = request2.success ? request2 : request1;
+        }
+        
+        const isWorking = successCount >= 2;
+        
+        if (isWorking) {
+            console.log('Proxy is working, running speedtest...');
+            const speedtest = await runSpeedtest();
+            
+            const ipData = finalResult.data || {};
+            const providers = ipData.providers || {};
+            
+            // Extract data with fallbacks
+            const country = providers.dbip?.country || providers.ip2location?.country || 
+                          providers.ipinfo?.country || providers.maxmind?.country || 'N/A';
+            const city = providers.dbip?.city || providers.ip2location?.city || 
+                        providers.ipinfo?.city || providers.maxmind?.city || 'N/A';
+            const asn_org = providers.dbip?.org_name || providers.ip2location?.org_name || 
+                           providers.ipinfo?.org_name || providers.maxmind?.org_name || 'N/A';
+            const asn_number = providers.dbip?.asn || providers.ip2location?.asn || 
+                              providers.ipinfo?.asn || providers.maxmind?.asn || 'N/A';
+            
+            return {
+                status: 'working',
+                name: outbound.tag || 'Unknown',
+                full_link: link,
+                ip_address: ipData.ip || 'N/A',
+                country_code: country,
+                city: city,
+                asn_organization: asn_org,
+                asn_number: asn_number,
+                ping_ms: finalResult.latency?.toFixed(0) || speedtest.ping_ms,
+                download_mbps: speedtest.download_mbps,
+                upload_mbps: speedtest.upload_mbps,
+                speedtest_result: speedtest,
+                ip_info_response: ipData,
+                timestamp: new Date().toISOString()
+            };
+        } else {
+            const error = finalResult.error || 'Connection failed';
+            return createErrorResult(link, error, outbound.tag);
+        }
+    } finally {
+        // Cleanup
+        if (singboxProcess) {
+            singboxProcess.kill('SIGTERM');
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            try {
+                singboxProcess.kill('SIGKILL');
+            } catch (e) {}
+        }
+        await exec(`rm -f ${configFile}`);
+    }
+}
+
+// Create error result
+function createErrorResult(link, error, name = 'Unknown') {
+    return {
+        status: 'error',
+        name: name,
+        full_link: link,
+        ip_address: 'N/A',
+        country_code: 'N/A',
+        city: 'N/A',
+        asn_organization: 'N/A',
+        asn_number: 'N/A',
+        ping_ms: 'N/A',
+        download_mbps: 'N/A',
+        upload_mbps: 'N/A',
+        error: error,
+        timestamp: new Date().toISOString()
+    };
+}
+
+// Main function
+async function main() {
+    console.log('Starting proxy tests...');
+    
+    const links = await readLinks();
+    if (links.length === 0) {
+        console.error('No links found in links.txt');
+        return;
+    }
+    
+    console.log(`Found ${links.length} links to test`);
+    
+    const results = [];
+    
+    for (let i = 0; i < links.length; i++) {
+        const result = await testProxy(links[i], i);
+        results.push(result);
+        
+        console.log(`Result: ${result.status}`);
+        if (result.status === 'error') {
+            console.log(`Error: ${result.error}`);
+        }
+    }
+    
+    // Save results
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const filename = `tested_${timestamp}.json`;
+    
+    await writeFile(filename, JSON.stringify(results, null, 2));
+    console.log(`\nResults saved to ${filename}`);
+    
+    // Summary
+    const working = results.filter(r => r.status === 'working').length;
+    const failed = results.filter(r => r.status === 'error').length;
+    console.log(`\nSummary: ${working} working, ${failed} failed`);
+}
+
+// Run
+main().catch(console.error);
