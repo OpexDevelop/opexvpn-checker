@@ -2,6 +2,9 @@ name: Test Proxy Servers
 
 on:
   workflow_dispatch:
+  schedule:
+    # Запускается каждый день в 00:00 UTC
+    - cron: '0 0 * * *'
 
 jobs:
   test-proxies:
@@ -55,7 +58,7 @@ jobs:
         run: |
           git config --global user.name 'GitHub Actions Bot'
           git config --global user.email 'github-actions-bot@users.noreply.github.com'
-          git add tested_*.json
+          git add db.json
           if ! git diff --staged --quiet; then
             git commit -m "Update proxy test results ($(date -u +'%Y-%m-%d %H:%M:%S UTC'))"
             git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }} HEAD:${{ github.ref_name }}
