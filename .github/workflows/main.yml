@@ -1,5 +1,4 @@
-# .github/workflows/main.yml
-name: Test Proxies
+name: Test Proxy Servers
 
 on:
   workflow_dispatch:
@@ -9,6 +8,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -16,38 +16,49 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-python@v5
         with:
           node-version: '20'
 
-      - name: Install dependencies
-        run: npm install
+      - name: Install Node.js dependencies
+        run: |
+          npm install
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y curl jq speedtest-cli bc
 
       - name: Download and install Sing-box
         run: |
           SINGBOX_VERSION="1.11.15"
+          echo "Installing Sing-box version: $SINGBOX_VERSION"
           wget https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-amd64.tar.gz
           tar -xzf sing-box-${SINGBOX_VERSION}-linux-amd64.tar.gz
-          sudo mv sing-box-${SINGBOX_VERSION}-linux-amd64/sing-box /usr/local/bin/sing-box
+          RELEASE_DIR_NAME="sing-box-${SINGBOX_VERSION}-linux-amd64"
+          if [ -f ./${RELEASE_DIR_NAME}/sing-box ]; then
+            sudo mv ./${RELEASE_DIR_NAME}/sing-box /usr/local/bin/sing-box
+          elif [ -f ./sing-box ]; then
+            sudo mv ./sing-box /usr/local/bin/sing-box
+          else
+            echo "Sing-box binary not found!"
+            exit 1
+          fi
           sudo chmod +x /usr/local/bin/sing-box
           sing-box version
 
-      - name: Install speedtest-cli
-        run: sudo apt-get install -y speedtest-cli
-
-      - name: Run proxy tester
-        run: node index.js
+      - name: Run proxy tests
+        run: |
+          node index.js
 
       - name: Commit results
         run: |
-          TIMESTAMP=$(date -u +'%Y-%m-%dT%H:%M:%SZ')
-          JSON_FILE="tested${TIMESTAMP}.json"
           git config --global user.name 'GitHub Actions Bot'
           git config --global user.email 'github-actions-bot@users.noreply.github.com'
-          git add "$JSON_FILE"
+          git add tested_*.json
           if ! git diff --staged --quiet; then
-            git commit -m "Update proxy test results ($TIMESTAMP)"
+            git commit -m "Update proxy test results ($(date -u +'%Y-%m-%d %H:%M:%S UTC'))"
             git push https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }} HEAD:${{ github.ref_name }}
           else
-            echo "No changes to proxy results."
+            echo "No changes to test results."
           fi
