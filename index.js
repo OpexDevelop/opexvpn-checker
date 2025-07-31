@@ -358,10 +358,18 @@ async function testProxyWithSettings(link, index, outbound, allowInsecure) {
         
         const isWorking = successCount >= 2;
         
+        // If working, run speedtest BEFORE killing sing-box
+        let speedtestResult = null;
+        if (isWorking) {
+            console.log('Running speedtest while proxy is active...');
+            speedtestResult = await runSpeedtest();
+        }
+        
         return {
             success: isWorking,
             result: finalResult,
-            insecure: allowInsecure
+            insecure: allowInsecure,
+            speedtest: speedtestResult
         };
     } finally {
         // Cleanup
@@ -413,7 +421,8 @@ async function testProxy(link, index) {
     
     if (testResult.success) {
         console.log(`Proxy is working (insecure: ${testResult.insecure})`);
-        const speedtest = await runSpeedtest();
+        
+        const speedtest = testResult.speedtest || { ping_ms: 'N/A', download_mbps: 'N/A', upload_mbps: 'N/A' };
         
         const ipData = testResult.result.data || {};
         const providers = ipData.providers || {};
