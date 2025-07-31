@@ -5,11 +5,12 @@ import { promisify } from 'util';
 import { exec as execCallback } from 'child_process';
 
 const exec = promisify(execCallback);
+
 const TEST_URL = 'https://ip.oxylabs.io/location';
-const PROXY_PORT = 10808;
-const PROXY_ADDRESS = `socks5h://127.0.0.1:${PROXY_PORT}`;
 const STARTUP_DELAY = 5000;
 const REQUEST_TIMEOUT = 15;
+const CONCURRENCY_LIMIT = 10; // Количество одновременных тестов
+const BASE_PORT = 20000; // Начальный порт для прокси
 
 async function readLinks() {
     try {
@@ -40,21 +41,21 @@ async function readLinks() {
     }
 }
 
-function createSingboxConfig(outbound, allowInsecure = false) {
+function createSingboxConfig(outbound, port, allowInsecure = false) {
     if (allowInsecure && outbound.tls && outbound.tls.enabled) {
         outbound.tls.insecure = true;
     }
 
     return {
         log: {
-            level: "info",
+            level: "error",
             timestamp: true
         },
         inbounds: [{
             type: "socks",
             tag: "socks-in",
             listen: "127.0.0.1",
-            listen_port: PROXY_PORT,
+            listen_port: port,
             sniff: true,
             sniff_override_destination: false
         }],
@@ -134,9 +135,10 @@ function startSingbox(configPath) {
     });
 }
 
-async function makeProxyRequest() {
+async function makeProxyRequest(port) {
     try {
-        const curlCommand = `curl -s --proxy "${PROXY_ADDRESS}" --max-time ${REQUEST_TIMEOUT} -w "\\n---STATS---\\nHTTP_CODE:%{http_code}\\nLATENCY_S:%{time_starttransfer}" "${TEST_URL}"`;
+        const proxyAddress = `socks5h://127.0.0.1:${port}`;
+        const curlCommand = `curl -s --proxy "${proxyAddress}" --max-time ${REQUEST_TIMEOUT} -w "\\n---STATS---\\nHTTP_CODE:%{http_code}\\nLATENCY_S:%{time_starttransfer}" "${TEST_URL}"`;
 
         const { stdout, stderr } = await exec(curlCommand);
 
@@ -175,9 +177,9 @@ async function makeProxyRequest() {
     }
 }
 
-async function testProxyWithSettings(link, index, outbound, allowInsecure) {
-    const configFile = `temp_config_${index}_${allowInsecure ? 'insecure' : 'secure'}.json`;
-    const config = createSingboxConfig(outbound, allowInsecure);
+async function testProxyWithSettings(link, index, outbound, port, allowInsecure) {
+    const configFile = `temp_config_${index}_${port}.json`;
+    const config = createSingboxConfig(outbound, port, allowInsecure);
 
     try {
         await writeFile(configFile, JSON.stringify(config, null, 2));
@@ -200,16 +202,16 @@ async function testProxyWithSettings(link, index, outbound, allowInsecure) {
     }
 
     try {
-        await makeProxyRequest();
+        await makeProxyRequest(port);
 
-        const request1 = await makeProxyRequest();
-        const request2 = await makeProxyRequest();
+        const request1 = await makeProxyRequest(port);
+        const request2 = await makeProxyRequest(port);
 
         let finalResult;
         let successCount = [request1, request2].filter(r => r.success).length;
 
         if (successCount === 1) {
-            const request3 = await makeProxyRequest();
+            const request3 = await makeProxyRequest(port);
             successCount = [request1, request2, request3].filter(r => r.success).length;
             finalResult = [request1, request2, request3].find(r => r.success) || request3;
         } else {
@@ -240,10 +242,7 @@ async function testProxyWithSettings(link, index, outbound, allowInsecure) {
     }
 }
 
-async function testProxy(link, index) {
-    console.log(`\n${'='.repeat(50)}`);
-    console.log(`Testing proxy ${index + 1}: ${link.substring(0, 50)}...`);
-
+async function testProxy(link, index, port) {
     let outbound;
     let name = 'Unknown';
 
@@ -255,21 +254,16 @@ async function testProxy(link, index) {
         outbound = outbounds[0];
         name = outbound.tag || extractNameFromLink(link) || `Proxy ${index + 1}`;
     } catch (error) {
-        console.error('Conversion error:', error.message);
         return createErrorResult(link, 'Conversion failed: ' + error.message, name);
     }
 
-    console.log('Testing with secure mode...');
-    let testResult = await testProxyWithSettings(link, index, outbound, false);
+    let testResult = await testProxyWithSettings(link, index, outbound, port, false);
 
     if (!testResult.success && outbound.tls && outbound.tls.enabled) {
-        console.log('Secure mode failed, trying with insecure mode...');
-        testResult = await testProxyWithSettings(link, index, outbound, true);
+        testResult = await testProxyWithSettings(link, index, outbound, port, true);
     }
 
     if (testResult.success) {
-        console.log(`Proxy is working (insecure: ${testResult.insecure})`);
-
         const ipData = testResult.result.data || {};
         const providers = ipData.providers || {};
 
@@ -297,7 +291,6 @@ async function testProxy(link, index) {
             timestamp: new Date().toISOString()
         };
     } else {
-        console.log('Proxy not working');
         const errorMessage = testResult.error || (testResult.result && testResult.result.error) || 'Unknown test failure';
         return createErrorResult(link, errorMessage, name);
     }
@@ -334,33 +327,46 @@ async function main() {
         return;
     }
 
-    console.log(`Found ${links.length} links to test`);
+    console.log(`Found ${links.length} links to test with concurrency of ${CONCURRENCY_LIMIT}`);
 
-    const results = [];
+    const allResults = [];
 
-    for (let i = 0; i < links.length; i++) {
-        const result = await testProxy(links[i], i);
-        results.push(result);
+    for (let i = 0; i < links.length; i += CONCURRENCY_LIMIT) {
+        const chunk = links.slice(i, i + CONCURRENCY_LIMIT);
+        console.log(`\nProcessing chunk ${i / CONCURRENCY_LIMIT + 1} of ${Math.ceil(links.length / CONCURRENCY_LIMIT)} (proxies ${i + 1} to ${i + chunk.length})...`);
 
-        console.log(`Result: ${result.status}`);
-        if (result.status === 'error') {
-            console.log(`Error: ${result.error}`);
-        }
+        const promises = chunk.map((link, chunkIndex) => {
+            const globalIndex = i + chunkIndex;
+            const port = BASE_PORT + globalIndex;
+            return testProxy(link, globalIndex, port);
+        });
+
+        const chunkResults = await Promise.allSettled(promises);
+
+        chunkResults.forEach(result => {
+            if (result.status === 'fulfilled') {
+                allResults.push(result.value);
+                console.log(`- Proxy ${result.value.name.substring(0, 30)}...: ${result.value.status.toUpperCase()}`);
+            } else {
+                console.error(`- A critical error occurred during test: ${result.reason}`);
+                // Можно добавить логирование ошибки в файл, если нужно
+            }
+        });
     }
 
     const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
     const filename = `tested_${timestamp}.json`;
 
-    await writeFile(filename, JSON.stringify(results, null, 2));
+    await writeFile(filename, JSON.stringify(allResults, null, 2));
     console.log(`\nResults saved to ${filename}`);
 
-    const working = results.filter(r => r.status === 'working').length;
-    const failed = results.filter(r => r.status === 'error').length;
-    const secure = results.filter(r => r.status === 'working' && !r.insecure).length;
-    const insecure = results.filter(r => r.status === 'working' && r.insecure).length;
+    const working = allResults.filter(r => r.status === 'working').length;
+    const failed = allResults.filter(r => r.status === 'error').length;
+    const secure = allResults.filter(r => r.status === 'working' && !r.insecure).length;
+    const insecure = allResults.filter(r => r.status === 'working' && r.insecure).length;
 
     console.log(`\nSummary:`);
-    console.log(`  Total: ${results.length}`);
+    console.log(`  Total: ${allResults.length}`);
     console.log(`  Working: ${working} (Secure: ${secure}, Insecure: ${insecure})`);
     console.log(`  Failed: ${failed}`);
 }
