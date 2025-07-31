@@ -27,7 +27,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y curl jq speedtest-cli bc proxychains4
+          sudo apt-get install -y curl jq bc
 
       - name: Download and install Sing-box
         run: |
