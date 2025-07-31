@@ -201,7 +201,7 @@ async function runSpeedtest() {
         
         for (const test of downloadTests) {
             try {
-                let curlCmd = `curl -s --proxy "${PROXY_ADDRESS}" --max-time 30 -w "\\n%{size_download}\\n%{time_total}\\n%{speed_download}" -o /dev/null`;
+                let curlCmd = `curl -s -L --proxy "${PROXY_ADDRESS}" --max-time 60 -w "\\n%{size_download}\\n%{time_total}\\n%{speed_download}" -o /dev/null`;
                 
                 // If maxBytes specified, limit download size
                 if (test.maxBytes) {
@@ -244,8 +244,7 @@ async function runSpeedtest() {
             const testDataSize = 1000000; // 1MB
             await exec(`dd if=/dev/urandom of=/tmp/upload_test.dat bs=1024 count=1000 2>/dev/null`);
             
-            const uploadStart = Date.now();
-            const { stdout } = await exec(`curl -s --proxy "${PROXY_ADDRESS}" --max-time 30 -X POST --data-binary @/tmp/upload_test.dat -w "\\n%{size_upload}\\n%{time_total}\\n%{speed_upload}" -o /dev/null "https://httpbin.org/post"`);
+            const { stdout } = await exec(`curl -s -L --proxy "${PROXY_ADDRESS}" --max-time 60 -X POST --data-binary @/tmp/upload_test.dat -w "\\n%{size_upload}\\n%{time_total}\\n%{speed_upload}" -o /dev/null "https://httpbin.org/post"`);
             
             const lines = stdout.trim().split('\n').filter(line => line);
             if (lines.length >= 3) {
